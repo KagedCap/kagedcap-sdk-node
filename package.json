@@ -1,0 +1,11 @@
+{
+  "name": "kagedcap",
+  "version": "0.1.0",
+  "description": "Official KagedCap Node.js SDK — solve reCAPTCHA v3 tokens.",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts"],
+  "engines": { "node": ">=18" },
+  "keywords": ["kagedcap", "recaptcha", "captcha", "solver"]
+}
