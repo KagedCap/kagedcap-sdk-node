@@ -8,7 +8,7 @@
  *   const { token } = await kc.solve({ sitekey, url, action, enterprise: true });
  */
 
-const DEFAULT_BASE_URL = 'https://recap.kagedcap.io';
+const DEFAULT_BASE_URL = 'https://api.kagedcap.io';
 
 const TASKS = [
   'ReCaptchaV3Task',
