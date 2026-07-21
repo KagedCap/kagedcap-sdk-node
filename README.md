@@ -25,6 +25,8 @@ const kc = new KagedCapClient(process.env.KAGEDCAP_API_KEY);
     sitekey: '6LcvL3UrAAAAAO_9u8Seiuf-I6F_tP_jSS-zndXV',
     url: 'https://www.ticketmaster.com',
     action: 'Event',
+    // Send a real desktop UA — the token embeds it, so match the browser your traffic presents.
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     enterprise: true, // ProxyLess Enterprise
   });
   console.log(token);
