@@ -15,6 +15,8 @@ const TASKS = [
   'ReCaptchaV3TaskProxyLess',
   'ReCaptchaV3EnterpriseTask',
   'ReCaptchaV3EnterpriseTaskProxyLess',
+  'ReCaptchaV2Task',
+  'ReCaptchaV2TaskProxyLess',
 ];
 
 class KagedCapError extends Error {
@@ -26,9 +28,11 @@ class KagedCapError extends Error {
   }
 }
 
-function deriveTask(enterprise, hasProxy) {
+function deriveTask(enterprise, hasProxy, version) {
+  const suffix = hasProxy ? 'Task' : 'TaskProxyLess';
+  if (version === 'v2') return 'ReCaptchaV2' + suffix; // no enterprise variant for v2 yet
   const base = enterprise ? 'ReCaptchaV3Enterprise' : 'ReCaptchaV3';
-  return base + (hasProxy ? 'Task' : 'TaskProxyLess');
+  return base + suffix;
 }
 
 function stripUndefined(obj) {
@@ -57,7 +61,7 @@ class KagedCapClient {
    * task, or set `task` explicitly.
    */
   async solve(params) {
-    const task = params.task || deriveTask(!!params.enterprise, !!params.proxy);
+    const task = params.task || deriveTask(!!params.enterprise, !!params.proxy, params.version);
     return this._request('POST', '/solve', {
       task,
       url: params.url,

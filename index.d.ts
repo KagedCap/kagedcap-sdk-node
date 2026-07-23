@@ -2,13 +2,18 @@ export type Task =
   | 'ReCaptchaV3Task'
   | 'ReCaptchaV3TaskProxyLess'
   | 'ReCaptchaV3EnterpriseTask'
-  | 'ReCaptchaV3EnterpriseTaskProxyLess';
+  | 'ReCaptchaV3EnterpriseTaskProxyLess'
+  | 'ReCaptchaV2Task'
+  | 'ReCaptchaV2TaskProxyLess';
 
 export interface SolveParams {
   sitekey: string;
   url: string;
-  action: string;
+  /** reCAPTCHA action — required for v3, ignored for v2. */
+  action?: string;
   task?: Task;
+  /** reCAPTCHA version: 'v3' (default) or 'v2' (invisible). Ignored if `task` is set. */
+  version?: 'v2' | 'v3';
   enterprise?: boolean;
   proxy?: string;
   userAgent?: string;
