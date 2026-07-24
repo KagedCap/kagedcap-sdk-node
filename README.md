@@ -2,8 +2,8 @@
 
 # KagedCap Node.js SDK
 
-Solve reCAPTCHA v3 and v3 Enterprise tokens with a single API key. Plain CommonJS,
-zero dependencies (uses Node's built-in `fetch`).
+Solve reCAPTCHA (v3, v3 Enterprise, v2), Ticketmaster tmpt, and Kasada with a single API
+key. Plain CommonJS, zero dependencies (uses Node's built-in `fetch`).
 
 ## Install
 
@@ -49,6 +49,22 @@ await kc.solve({
 
 Omit `proxy` for a ProxyLess solve. Set `enterprise: true` for Enterprise sitekeys,
 or pass `task` explicitly.
+
+## Kasada
+
+`kasadaLogin` starts a session (requires a proxy — the token is IP-bound) and returns the
+full header set. Keep that result and pass it to `kasadaReload` to refresh the session — the
+SDK resends the session's `kpsdk_st` and `x_kpsdk_*` values for you.
+
+```js
+const login = await kc.kasadaLogin({ site: 'ticketmaster', proxy: 'http://user:pass@1.2.3.4:8080' });
+// Replay login.headers (user-agent + sec-ch-ua*) and login.x_kpsdk_* on your request.
+
+const fresh = await kc.kasadaReload(login); // no proxy needed
+console.log(fresh.x_kpsdk_cd);
+```
+
+Kasada results have **no `token`** — replay `headers` and the `x_kpsdk_*` values instead.
 
 ## Errors
 

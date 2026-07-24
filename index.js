@@ -1,11 +1,14 @@
 'use strict';
 
 /**
- * KagedCap Node.js SDK (CommonJS) — solve reCAPTCHA v3 tokens with an API key.
+ * KagedCap Node.js SDK (CommonJS) — solve reCAPTCHA, Ticketmaster tmpt, and Kasada.
  *
  *   const { KagedCapClient } = require('kagedcap');
  *   const kc = new KagedCapClient(process.env.KAGEDCAP_API_KEY);
  *   const { token } = await kc.solve({ sitekey, url, action, enterprise: true });
+ *
+ *   const login = await kc.kasadaLogin({ site: 'ticketmaster', proxy });
+ *   const fresh = await kc.kasadaReload(login); // reuses login's kpsdk_st + x_kpsdk_*
  */
 
 const DEFAULT_BASE_URL = 'https://api.kagedcap.io';
@@ -17,6 +20,9 @@ const TASKS = [
   'ReCaptchaV3EnterpriseTaskProxyLess',
   'ReCaptchaV2Task',
   'ReCaptchaV2TaskProxyLess',
+  'TicketmasterTmptTask',
+  'KasadaLogin',
+  'KasadaReload',
 ];
 
 class KagedCapError extends Error {
@@ -39,6 +45,17 @@ function stripUndefined(obj) {
   const out = {};
   for (const k of Object.keys(obj)) if (obj[k] !== undefined) out[k] = obj[k];
   return out;
+}
+
+/**
+ * Normalize a KasadaLogin result (or explicit reload params) into reload inputs, carrying
+ * the session's kpsdk_st + x_kpsdk_* forward so a login's headers flow into the reload.
+ */
+function toKasadaReloadParams(session) {
+  if (session && 'x_kpsdk_cd' in session) {
+    return { kpsdk_st: session.kpsdk_st, x_kpsdk_ct: session.x_kpsdk_ct, x_kpsdk_v: session.x_kpsdk_v, x_kpsdk_h: session.x_kpsdk_h, site: session.site };
+  }
+  return session || {};
 }
 
 class KagedCapClient {
@@ -75,6 +92,39 @@ class KagedCapClient {
     });
   }
 
+  /**
+   * Start a Kasada session. Requires `proxy` (the token is IP-bound). Returns the full
+   * header set — keep it and pass it to `kasadaReload` to refresh the session later.
+   * @param {{ proxy: string, site?: string, url?: string }} params
+   */
+  async kasadaLogin(params) {
+    params = params || {};
+    return this._request('POST', '/solve', {
+      task: 'KasadaLogin',
+      site: params.site,
+      url: params.url,
+      proxy: params.proxy,
+    });
+  }
+
+  /**
+   * Refresh a Kasada session (no proxy needed). Pass the `kasadaLogin` result directly (its
+   * kpsdk_st + x_kpsdk_* are resent for you) or explicit params.
+   * @param {object} session - a kasadaLogin result, or { kpsdk_st, x_kpsdk_ct?, x_kpsdk_v?, x_kpsdk_h? }
+   */
+  async kasadaReload(session) {
+    const p = toKasadaReloadParams(session);
+    if (p.kpsdk_st == null) throw new KagedCapError(0, 'validation_error', 'kasadaReload: kpsdk_st is required — pass the kasadaLogin result or an explicit kpsdk_st');
+    return this._request('POST', '/solve', {
+      task: 'KasadaReload',
+      site: p.site,
+      kpsdk_st: p.kpsdk_st,
+      x_kpsdk_ct: p.x_kpsdk_ct,
+      x_kpsdk_v: p.x_kpsdk_v,
+      x_kpsdk_h: p.x_kpsdk_h,
+    });
+  }
+
   /** Current balance for the API key's account. */
   async checkBalance() {
     return this._request('GET', '/v1/balance');
@@ -106,4 +156,4 @@ class KagedCapClient {
   }
 }
 
-module.exports = { KagedCapClient, KagedCapError, deriveTask, TASKS };
+module.exports = { KagedCapClient, KagedCapError, deriveTask, toKasadaReloadParams, TASKS };

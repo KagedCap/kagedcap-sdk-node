@@ -1,11 +1,11 @@
 {
   "name": "kagedcap",
-  "version": "0.1.0",
-  "description": "Official KagedCap Node.js SDK — solve reCAPTCHA v3 tokens.",
+  "version": "0.2.0",
+  "description": "Official KagedCap Node.js SDK — solve reCAPTCHA, Ticketmaster tmpt, and Kasada.",
   "license": "MIT",
   "main": "index.js",
   "types": "index.d.ts",
   "files": ["index.js", "index.d.ts"],
   "engines": { "node": ">=18" },
-  "keywords": ["kagedcap", "recaptcha", "captcha", "solver"]
+  "keywords": ["kagedcap", "recaptcha", "captcha", "solver", "kasada", "ticketmaster"]
 }
