@@ -46,6 +46,9 @@ export interface KasadaLoginParams {
 /** Inputs to refresh a Kasada session (KasadaReload). */
 export interface KasadaReloadParams {
   kpsdk_st: number;
+  /** Session PoW hash (sessionHash) from the prior KasadaLogin — required; the cd seed embeds it. */
+  hash?: string;
+  /** Session token from the prior KasadaLogin — required; its leading chars seed the cd. */
   x_kpsdk_ct?: string;
   x_kpsdk_v?: string;
   x_kpsdk_h?: string;
@@ -63,6 +66,10 @@ export interface KasadaResult {
   x_kpsdk_v: string;
   x_kpsdk_h: string;
   kpsdk_st: number | null;
+  /** Session PoW hash (sessionHash) — pass back to kasadaReload to refresh the cd. */
+  hash: string;
+  /** Kasada's trust verdict: true = high-trust token. */
+  reload: boolean;
   user_agent: string;
 }
 

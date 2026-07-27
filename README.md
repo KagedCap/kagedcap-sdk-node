@@ -54,7 +54,7 @@ or pass `task` explicitly.
 
 `kasadaLogin` starts a session (requires a proxy — the token is IP-bound) and returns the
 full header set. Keep that result and pass it to `kasadaReload` to refresh the session — the
-SDK resends the session's `kpsdk_st` and `x_kpsdk_*` values for you.
+SDK resends the session's `kpsdk_st`, `hash`, and `x_kpsdk_*` values for you (`hash` + `x_kpsdk_ct` are required).
 
 ```js
 const login = await kc.kasadaLogin({ site: 'ticketmaster', proxy: 'http://user:pass@1.2.3.4:8080' });

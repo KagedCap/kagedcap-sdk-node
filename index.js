@@ -53,7 +53,7 @@ function stripUndefined(obj) {
  */
 function toKasadaReloadParams(session) {
   if (session && 'x_kpsdk_cd' in session) {
-    return { kpsdk_st: session.kpsdk_st, x_kpsdk_ct: session.x_kpsdk_ct, x_kpsdk_v: session.x_kpsdk_v, x_kpsdk_h: session.x_kpsdk_h, site: session.site };
+    return { kpsdk_st: session.kpsdk_st, hash: session.hash, x_kpsdk_ct: session.x_kpsdk_ct, x_kpsdk_v: session.x_kpsdk_v, x_kpsdk_h: session.x_kpsdk_h, site: session.site };
   }
   return session || {};
 }
@@ -110,13 +110,14 @@ class KagedCapClient {
   /**
    * Refresh a Kasada session (no proxy needed). Pass the `kasadaLogin` result directly (its
    * kpsdk_st + x_kpsdk_* are resent for you) or explicit params.
-   * @param {object} session - a kasadaLogin result, or { kpsdk_st, x_kpsdk_ct?, x_kpsdk_v?, x_kpsdk_h? }
+   * @param {object} session - a kasadaLogin result, or { kpsdk_st, hash, x_kpsdk_ct, x_kpsdk_v?, x_kpsdk_h? } (hash + x_kpsdk_ct required)
    */
   async kasadaReload(session) {
     const p = toKasadaReloadParams(session);
     if (p.kpsdk_st == null) throw new KagedCapError(0, 'validation_error', 'kasadaReload: kpsdk_st is required — pass the kasadaLogin result or an explicit kpsdk_st');
     return this._request('POST', '/solve', {
       task: 'KasadaReload',
+      hash: p.hash,
       site: p.site,
       kpsdk_st: p.kpsdk_st,
       x_kpsdk_ct: p.x_kpsdk_ct,
