@@ -1,6 +1,6 @@
 {
   "name": "kagedcap",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Official KagedCap Node.js SDK — solve reCAPTCHA, Ticketmaster tmpt, and Kasada.",
   "license": "MIT",
   "main": "index.js",

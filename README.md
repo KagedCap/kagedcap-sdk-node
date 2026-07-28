@@ -70,7 +70,7 @@ Kasada results have **no `token`** — replay `headers` and the `x_kpsdk_*` valu
 
 Failures throw `KagedCapError` with `.status`, `.code`, `.message`. Common codes:
 `unauthorized`, `insufficient_funds`, `solve_failed`, `solve_timeout`,
-`proxy_required`, `proxy_not_allowed`, `validation_error`.
+`proxy_required`, `proxy_not_allowed`, `validation_error`, `concurrency_limit_exceeded`, `key_frozen`.
 
 ```js
 const { KagedCapError } = require('kagedcap');
