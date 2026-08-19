@@ -19,6 +19,7 @@ export interface SolveParams {
   version?: 'v2' | 'v3';
   enterprise?: boolean;
   proxy?: string;
+  /** Browser UA the token embeds. Omit it and `DEFAULT_USER_AGENT` is sent instead. */
   userAgent?: string;
   device?: 'desktop' | 'mobile';
   enhanced?: boolean;
@@ -102,3 +103,8 @@ export class KagedCapClient {
 export function deriveTask(enterprise: boolean, hasProxy: boolean): Task;
 export function toKasadaReloadParams(session: KasadaResult | KasadaReloadParams): KasadaReloadParams;
 export const TASKS: Task[];
+/**
+ * UA sent on reCAPTCHA and tmpt solves that omit `userAgent` — the Chrome 151 Windows desktop
+ * profile the solver fleet runs. Never sent on Kasada tasks.
+ */
+export const DEFAULT_USER_AGENT: string;

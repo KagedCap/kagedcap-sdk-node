@@ -13,6 +13,14 @@
 
 const DEFAULT_BASE_URL = 'https://api.kagedcap.io';
 
+/**
+ * UA sent when a solve doesn't carry one. This is the exact Chrome 151 Windows desktop profile
+ * the solver fleet runs, so the token embeds an identity the server already agrees with instead
+ * of a blank one. Bump this single line when the fleet moves to a newer Chrome.
+ */
+const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
+
 const TASKS = [
   'ReCaptchaV3Task',
   'ReCaptchaV3TaskProxyLess',
@@ -76,16 +84,21 @@ class KagedCapClient {
   /**
    * Solve a captcha. Pass `enterprise` and (optionally) `proxy` to auto-select the
    * task, or set `task` explicitly.
+   *
+   * Omitting `userAgent` sends DEFAULT_USER_AGENT — a caller-supplied one always wins. Kasada
+   * tasks are skipped: their identity comes from the harvester, and the gateway drops any UA
+   * we send for that fleet.
    */
   async solve(params) {
     const task = params.task || deriveTask(!!params.enterprise, !!params.proxy, params.version);
+    const isKasada = task === 'KasadaLogin' || task === 'KasadaReload';
     return this._request('POST', '/solve', {
       task,
       url: params.url,
       sitekey: params.sitekey,
       action: params.action,
       proxy: params.proxy,
-      userAgent: params.userAgent,
+      userAgent: params.userAgent || (isKasada ? undefined : DEFAULT_USER_AGENT),
       device: params.device,
       enhanced: params.enhanced,
       secretKey: params.secretKey,
@@ -157,4 +170,4 @@ class KagedCapClient {
   }
 }
 
-module.exports = { KagedCapClient, KagedCapError, deriveTask, toKasadaReloadParams, TASKS };
+module.exports = { KagedCapClient, KagedCapError, deriveTask, toKasadaReloadParams, TASKS, DEFAULT_USER_AGENT };
