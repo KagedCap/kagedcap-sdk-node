@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * KagedCap Node.js SDK (CommonJS) — solve reCAPTCHA, Ticketmaster tmpt, and Kasada.
+ * KagedCap Node.js SDK (CommonJS) — solve reCAPTCHA, Ticketmaster tmpt, Kasada, and evaluate.
  *
  *   const { KagedCapClient } = require('kagedcap');
  *   const kc = new KagedCapClient(process.env.KAGEDCAP_API_KEY);
@@ -9,6 +9,8 @@
  *
  *   const login = await kc.kasadaLogin({ site: 'ticketmaster', proxy });
  *   const fresh = await kc.kasadaReload(login); // reuses login's kpsdk_st + x_kpsdk_*
+ *
+ *   const { token, decision } = await kc.evaluate({ url, proxy }); // Ticketmaster EPSF
  */
 
 const DEFAULT_BASE_URL = 'https://api.kagedcap.io';
@@ -31,6 +33,7 @@ const TASKS = [
   'TicketmasterTmptTask',
   'KasadaLogin',
   'KasadaReload',
+  'EvaluateTask',
 ];
 
 class KagedCapError extends Error {
@@ -136,6 +139,33 @@ class KagedCapClient {
       x_kpsdk_ct: p.x_kpsdk_ct,
       x_kpsdk_v: p.x_kpsdk_v,
       x_kpsdk_h: p.x_kpsdk_h,
+    });
+  }
+
+  /**
+   * Evaluate a Ticketmaster EPSF check. Requires `proxy` (the verdict is IP-bound) and the page
+   * `url` — the host is what picks the flow: `auth.*` evaluates verify_phone, every other
+   * Ticketmaster host evaluates join_queue. Returns the allow token plus the `decision`
+   * (allow | challenge | block) behind it.
+   *
+   * `action` is left undefined unless the caller names one: sending it overrides that host-based
+   * default, so a value we invented here would silently evaluate the wrong flow. Same reason the
+   * flow-specific fields (`phone_number`, `queueId`, `eventId`) are only forwarded when set.
+   *
+   * `userAgent` defaults to DEFAULT_USER_AGENT like a solve does — here it selects the whole
+   * device profile the solver runs (screen, GPU, client hints), not just a header.
+   * @param {{ url: string, proxy: string, action?: 'verify_phone'|'join_queue', phone_number?: string, queueId?: string, eventId?: string, userAgent?: string }} params
+   */
+  async evaluate(params) {
+    return this._request('POST', '/solve', {
+      task: 'EvaluateTask',
+      url: params.url,
+      proxy: params.proxy,
+      action: params.action,
+      phone_number: params.phone_number,
+      queueId: params.queueId,
+      eventId: params.eventId,
+      userAgent: params.userAgent || DEFAULT_USER_AGENT,
     });
   }
 

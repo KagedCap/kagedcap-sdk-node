@@ -7,7 +7,8 @@ export type Task =
   | 'ReCaptchaV2TaskProxyLess'
   | 'TicketmasterTmptTask'
   | 'KasadaLogin'
-  | 'KasadaReload';
+  | 'KasadaReload'
+  | 'EvaluateTask';
 
 export interface SolveParams {
   sitekey: string;
@@ -74,6 +75,32 @@ export interface KasadaResult {
   user_agent: string;
 }
 
+/** Inputs for a Ticketmaster EPSF evaluate (EvaluateTask). */
+export interface EvaluateParams {
+  /** Ticketmaster page URL — its host picks the flow: `auth.*` → verify_phone, else join_queue. */
+  url: string;
+  /** Proxy — required; the verdict is IP-bound. */
+  proxy: string;
+  /** Overrides the host-based flow. Omit it to keep that default. */
+  action?: 'verify_phone' | 'join_queue';
+  /** verify_phone only. Include the country prefix, e.g. '+12025550123'. */
+  phone_number?: string;
+  /** join_queue only. */
+  queueId?: string;
+  /** join_queue only. */
+  eventId?: string;
+  /** Selects the solver's device profile, not just a header. Omit it and `DEFAULT_USER_AGENT` is sent. */
+  userAgent?: string;
+}
+
+/** Evaluate result — `token` is the EPSF allow token to replay on the next APS step. */
+export interface EvaluateResult {
+  success: boolean;
+  task: string;
+  token: string;
+  decision: 'allow' | 'challenge' | 'block';
+}
+
 export interface Balance {
   amount_micros: string;
   held_micros: string;
@@ -97,6 +124,7 @@ export class KagedCapClient {
   solve(params: SolveParams): Promise<SolveResult>;
   kasadaLogin(params: KasadaLoginParams): Promise<KasadaResult>;
   kasadaReload(session: KasadaResult | KasadaReloadParams): Promise<KasadaResult>;
+  evaluate(params: EvaluateParams): Promise<EvaluateResult>;
   checkBalance(): Promise<Balance>;
 }
 
@@ -104,7 +132,7 @@ export function deriveTask(enterprise: boolean, hasProxy: boolean): Task;
 export function toKasadaReloadParams(session: KasadaResult | KasadaReloadParams): KasadaReloadParams;
 export const TASKS: Task[];
 /**
- * UA sent on reCAPTCHA and tmpt solves that omit `userAgent` — the Chrome 151 Windows desktop
- * profile the solver fleet runs. Never sent on Kasada tasks.
+ * UA sent on reCAPTCHA, tmpt, and evaluate calls that omit `userAgent` — the Chrome 151 Windows
+ * desktop profile the solver fleet runs. Never sent on Kasada tasks.
  */
 export const DEFAULT_USER_AGENT: string;

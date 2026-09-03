@@ -2,8 +2,8 @@
 
 # KagedCap Node.js SDK
 
-Solve reCAPTCHA (v3, v3 Enterprise, v2), Ticketmaster tmpt, and Kasada with a single API
-key. Plain CommonJS, zero dependencies (uses Node's built-in `fetch`).
+Solve reCAPTCHA (v3, v3 Enterprise, v2), Ticketmaster tmpt, Kasada, and Ticketmaster EPSF
+evaluate with a single API key. Plain CommonJS, zero dependencies (uses Node's built-in `fetch`).
 
 ## Install
 
@@ -77,6 +77,24 @@ console.log(fresh.x_kpsdk_cd);
 ```
 
 Kasada results have **no `token`** — replay `headers` and the `x_kpsdk_*` values instead.
+
+## Evaluate
+
+`evaluate` runs a Ticketmaster EPSF check and returns the allow token to replay on the next APS
+step, plus the `decision` behind it (`allow`, `challenge`, or `block`). `url` and `proxy` are
+required — the host picks the flow, so `auth.*` evaluates verify_phone and any other Ticketmaster
+host evaluates join_queue.
+
+```js
+const { token, decision } = await kc.evaluate({
+  url: 'https://auth.ticketmaster.com/…',
+  proxy: 'http://user:pass@1.2.3.4:8080',
+  phone_number: '+12025550123', // verify_phone only, country prefix included
+});
+```
+
+Pass `action: 'verify_phone' | 'join_queue'` only to override that host default — leaving it off
+is what keeps it. For a join_queue evaluate, pass `queueId` / `eventId` instead of `phone_number`.
 
 ## Errors
 
