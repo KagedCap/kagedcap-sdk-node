@@ -61,6 +61,24 @@ function deriveTask(enterprise, hasProxy, version) {
   return base + suffix;
 }
 
+/**
+ * reCAPTCHA tasks are the ONLY ones whose result the async endpoint can carry.
+ *
+ * A v2 job row stores a single `token` string and `GET /v2/solve/{id}` returns that and nothing
+ * else. Per fleet: reCAPTCHA is a token (v2 also drops score/verification); tmpt is a token;
+ * evaluate additionally returns `decision`, which would be lost; and Kasada has NO token at all
+ * — it answers with headers, x_kpsdk_ct/cd/v/h, hash and kpsdk_st.
+ *
+ * Kasada is what makes this a billing bug rather than a cosmetic one: the solve dispatches,
+ * succeeds, is charged for, and the job row has nowhere to put the result, so the caller polls
+ * to `done` and reads a null token. Non-reCAPTCHA work therefore goes over `/solve`.
+ *
+ * Widen this ONLY when the job row can carry the fleet's result, not when v2 merely accepts it.
+ */
+function isRecaptchaTask(task) {
+  return typeof task === 'string' && task.startsWith('ReCaptcha');
+}
+
 function stripUndefined(obj) {
   const out = {};
   for (const k of Object.keys(obj)) if (obj[k] !== undefined) out[k] = obj[k];
@@ -147,7 +165,7 @@ class KagedCapClient {
 
     // The v2 submit body is the v1 /solve body verbatim plus callback_url, so this stays in step
     // with solveDeprecated below — anything added there belongs here too.
-    const job = await this._request('POST', '/v2/solve', {
+    const body = {
       task,
       url: params.url,
       sitekey: params.sitekey,
@@ -157,6 +175,23 @@ class KagedCapClient {
       device: params.device,
       enhanced: params.enhanced,
       secretKey: params.secretKey,
+    };
+
+    /*
+     * tmpt, evaluate and Kasada run over `/solve`. Not a limitation of those fleets — the async
+     * job row cannot hold their results (see isRecaptchaTask). Transparent to the caller: they
+     * still get that fleet's full response, still bounded by `deadlineMs` and still cancellable
+     * via `signal`; only the transport differs.
+     */
+    if (!isRecaptchaTask(task)) {
+      return this._request('POST', '/solve', body, {
+        signal,
+        timeoutMs: Math.min(this.timeoutMs, deadlineMs),
+      });
+    }
+
+    const job = await this._request('POST', '/v2/solve', {
+      ...body,
       callback_url: params.callback_url,
     }, {
       signal,
