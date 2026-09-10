@@ -10,10 +10,11 @@ export type Task =
   | 'KasadaReload'
   | 'EvaluateTask';
 
-export interface SolveParams {
+/** Inputs to `solveDeprecated`, the legacy synchronous solve. */
+export interface SolveDeprecatedParams {
   sitekey: string;
   url: string;
-  /** reCAPTCHA action — required for v3, ignored for v2. */
+  /** reCAPTCHA action. Optional: omit it for a no-action solve. Ignored for v2. */
   action?: string;
   task?: Task;
   /** reCAPTCHA version: 'v3' (default) or 'v2' (invisible). Ignored if `task` is set. */
@@ -27,7 +28,43 @@ export interface SolveParams {
   secretKey?: string;
 }
 
+/** Inputs to `solve` — the same solve fields, plus the budget it polls within. */
+export interface SolveParams extends SolveDeprecatedParams {
+  /** Whole budget for the submit plus every poll. Defaults to 120000 (120s). */
+  deadlineMs?: number;
+  /** Gap between polls of `/v2/solve/{id}`. Defaults to 5000 (5s). */
+  pollIntervalMs?: number;
+  /** https URL, publicly resolvable — the gateway POSTs the finished solve to it as well. */
+  callback_url?: string;
+  /** Sent as `Idempotency-Key`: a resent submit returns the first job rather than a second solve. */
+  idempotencyKey?: string;
+  /** Cancels the solve mid-request or mid-wait with a `KagedCapError` coded `'aborted'`. */
+  signal?: AbortSignal;
+}
+
+/**
+ * A finished solve as `/v2/solve/{id}` reports it. `solve` resolves only on `status: 'done'` with
+ * a token still attached, so `token` is a string here — a 'done' poll that arrives after the
+ * gateway cleared it throws `result_expired` instead.
+ */
 export interface SolveResult {
+  id: string;
+  status: 'done';
+  /** True alongside `status: 'done'`. `status` is the completion test; this only mirrors it. */
+  success: boolean;
+  token: string;
+  /** Absent or null when the gateway didn't record it — never require it. */
+  solve_ms?: number | null;
+  /** Absent or null when the gateway didn't record it — never require it. */
+  elapsed_ms?: number | null;
+  created_at: string;
+  completed_at?: string;
+  /** Present only when the solve carried a `callback_url`. */
+  callback?: { delivered: boolean; attempts: number };
+}
+
+/** Result of the legacy synchronous `/solve` call. */
+export interface SolveDeprecatedResult {
   success: boolean;
   token: string;
   task: string;
@@ -115,20 +152,26 @@ export interface ClientOptions {
 }
 
 export class KagedCapError extends Error {
+  /** HTTP status, or 0 for a failure raised client-side (`timeout`, `aborted`, `result_expired`). */
   status: number;
   code: string;
+  /** `request_id` off the gateway's error envelope, when it sent one. Quote it to support. */
+  requestId?: string;
 }
 
 export class KagedCapClient {
   constructor(apiKey: string, opts?: ClientOptions);
+  /** Submits to `/v2/solve` and polls `/v2/solve/{id}` until it finishes, within `deadlineMs`. */
   solve(params: SolveParams): Promise<SolveResult>;
+  /** @deprecated Use `solve`. This calls the legacy synchronous `/solve` endpoint. */
+  solveDeprecated(params: SolveDeprecatedParams): Promise<SolveDeprecatedResult>;
   kasadaLogin(params: KasadaLoginParams): Promise<KasadaResult>;
   kasadaReload(session: KasadaResult | KasadaReloadParams): Promise<KasadaResult>;
   evaluate(params: EvaluateParams): Promise<EvaluateResult>;
   checkBalance(): Promise<Balance>;
 }
 
-export function deriveTask(enterprise: boolean, hasProxy: boolean): Task;
+export function deriveTask(enterprise: boolean, hasProxy: boolean, version?: 'v2' | 'v3'): Task;
 export function toKasadaReloadParams(session: KasadaResult | KasadaReloadParams): KasadaReloadParams;
 export const TASKS: Task[];
 /**

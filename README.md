@@ -21,7 +21,7 @@ const { KagedCapClient } = require('kagedcap');
 const kc = new KagedCapClient(process.env.KAGEDCAP_API_KEY);
 
 (async () => {
-  const { token, score } = await kc.solve({
+  const { token } = await kc.solve({
     sitekey: '6LcvL3UrAAAAAO_9u8Seiuf-I6F_tP_jSS-zndXV',
     url: 'https://www.ticketmaster.com',
     action: 'Event',
@@ -33,6 +33,66 @@ const kc = new KagedCapClient(process.env.KAGEDCAP_API_KEY);
   console.log('balance:', bal.display);
 })();
 ```
+
+## How `solve` works
+
+`solve` submits the job to `POST /v2/solve`, then polls `GET /v2/solve/{id}` every 5s until the
+job reports `done` or `failed`. It still blocks and still resolves with the token — the difference
+is that no HTTP connection is held open for the length of the solve, so a slow solve can't be cut
+short by a proxy or load balancer idling your connection out.
+
+Two knobs, both per call:
+
+```js
+const { token, solve_ms } = await kc.solve({
+  sitekey: '6Lc…',
+  url: 'https://example.com',
+  action: 'login',
+  deadlineMs: 60000,    // whole budget: submit + every poll. Default 120000.
+  pollIntervalMs: 2000, // gap between polls. Default 5000.
+});
+```
+
+Past `deadlineMs` you get a `KagedCapError` with code `timeout`. `solve_ms` and `elapsed_ms` are
+reported when the gateway has them and are absent or `null` otherwise — don't build on them.
+
+Pass an `AbortSignal` to stop a solve early (code `aborted`); it cuts both an in-flight request
+and the wait between polls:
+
+```js
+const ac = new AbortController();
+setTimeout(() => ac.abort(), 10000);
+await kc.solve({ sitekey: '6Lc…', url: 'https://example.com', signal: ac.signal });
+```
+
+`callback_url` (https, publicly resolvable) has the gateway POST the finished result to you as
+well, and `idempotencyKey` is sent as `Idempotency-Key` — dedupe is durable and cross-shard, so a
+resent submit returns the first job instead of buying a second solve:
+
+```js
+await kc.solve({
+  sitekey: '6Lc…',
+  url: 'https://example.com',
+  callback_url: 'https://hooks.example.com/kagedcap',
+  idempotencyKey: orderId,
+});
+```
+
+The gateway clears a result's `token` about five minutes after the solve completes (a reCAPTCHA
+token is dead in ~2 anyway). A poll that lands after that throws `result_expired` rather than
+handing back an empty token — read the result promptly, or use `callback_url`.
+
+### The old synchronous call
+
+`solveDeprecated` is the previous behaviour, unchanged: one `POST /solve` that holds the
+connection open for the whole solve and returns `{ success, token, task, score, verification }`.
+It still works and takes the same params minus the polling ones. New code should use `solve`.
+
+```js
+const { token, score } = await kc.solveDeprecated({ sitekey: '6Lc…', url: 'https://example.com', action: 'login' });
+```
+
+`kasadaLogin`, `kasadaReload`, and `evaluate` are unaffected — they still call `/solve` directly.
 
 ### User agent
 
@@ -98,9 +158,16 @@ is what keeps it. For a join_queue evaluate, pass `queueId` / `eventId` instead 
 
 ## Errors
 
-Failures throw `KagedCapError` with `.status`, `.code`, `.message`. Common codes:
-`unauthorized`, `insufficient_funds`, `solve_failed`, `solve_timeout`,
-`proxy_required`, `proxy_not_allowed`, `validation_error`, `concurrency_limit_exceeded`, `key_frozen`.
+Failures throw `KagedCapError` with `.status`, `.code`, `.message`, and `.requestId` when the
+gateway sent one. Common codes from the API: `unauthorized`, `insufficient_funds`, `solve_failed`,
+`solve_timeout`, `proxy_required`, `proxy_not_allowed`, `validation_error`,
+`concurrency_limit_exceeded`, `key_frozen`, `callback_url_invalid`, `maintenance`,
+`proxyless_disabled`, and `not_found` (an unknown job id — including one that belongs to another
+account).
+
+Raised by the SDK itself, with `.status` 0: `timeout` (the solve outran `deadlineMs`), `aborted`
+(your `AbortSignal` fired), `result_expired` (the job finished but its token was already cleared),
+and `network_error`.
 
 ```js
 const { KagedCapError } = require('kagedcap');
