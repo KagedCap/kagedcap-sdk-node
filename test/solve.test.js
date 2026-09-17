@@ -219,3 +219,34 @@ test('kasada and evaluate stay on the synchronous /solve endpoint', async () => 
   await client(evaluate).evaluate({ url: 'https://auth.ticketmaster.com/x', proxy: 'http://u:p@1.2.3.4:8080' });
   assert.equal(evaluate.calls[0].url, 'https://api.kagedcap.io/solve');
 });
+
+/*
+ * Only reCAPTCHA rides the async endpoint.
+ *
+ * A v2 job row holds one `token` string, so it cannot represent a Kasada result (headers,
+ * x_kpsdk_*, hash — no token at all) or evaluate's `decision`. Routing those through /v2/solve
+ * charged the customer and handed back a null token. These pin the split so a future
+ * "v2 for everything" change has to delete a test that says why.
+ */
+
+test('solve uses the async endpoint for reCAPTCHA', async () => {
+  const fetch = stubFetch([ACCEPTED, DONE]);
+  await client(fetch).solve(Object.assign({}, SOLVE, { task: 'ReCaptchaV3EnterpriseTask' }));
+  assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/v2/solve');
+});
+
+for (const task of ['KasadaLogin', 'KasadaReload', 'TicketmasterTmptTask', 'EvaluateTask']) {
+  test(`solve uses the synchronous /solve for ${task}`, async () => {
+    const fetch = stubFetch([{ status: 200, body: { success: true, task, token: 'tok' } }]);
+    const res = await client(fetch).solve(Object.assign({}, SOLVE, { task }));
+
+    // One request, and it is the synchronous one — no job id, no polling.
+    assert.equal(fetch.calls.length, 1);
+    assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/solve');
+    assert.equal(fetch.calls[0].init.method, 'POST');
+    assert.equal(fetch.calls[0].body.task, task);
+    // callback_url is a v2-only field and must not leak onto the v1 body.
+    assert.ok(!('callback_url' in fetch.calls[0].body));
+    assert.equal(res.token, 'tok');
+  });
+}
