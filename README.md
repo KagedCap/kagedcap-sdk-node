@@ -159,11 +159,30 @@ is what keeps it. For a join_queue evaluate, pass `queueId` / `eventId` instead 
 ## Errors
 
 Failures throw `KagedCapError` with `.status`, `.code`, `.message`, and `.requestId` when the
-gateway sent one. Common codes from the API: `unauthorized`, `insufficient_funds`, `solve_failed`,
-`solve_timeout`, `proxy_required`, `proxy_not_allowed`, `validation_error`,
-`concurrency_limit_exceeded`, `key_frozen`, `callback_url_invalid`, `maintenance`,
-`proxyless_disabled`, and `not_found` (an unknown job id — including one that belongs to another
-account).
+gateway sent one. Codes from the API, grouped by HTTP status:
+
+- **400** `validation_error` (bad request shape), `proxy_invalid` (proxy malformed or disallowed —
+  caught pre-flight, no solve attempted), `callback_url_invalid` (`callback_url` isn't a public
+  https URL)
+- **401** `unauthorized` (missing or invalid API key)
+- **402** `insufficient_funds`, `key_spend_cap_reached`, `subscription_quota_exhausted`,
+  `subscription_past_due`
+- **403** `account_suspended`, `host_not_allowed` (the key's allowlist doesn't include the page host)
+- **404** `not_found` (a `/v2` job id that's unknown, expired, or not yours)
+- **409** `idempotency_conflict` (same `Idempotency-Key`, different body)
+- **422** `proxy_unreachable` — the solve ran and your proxy didn't answer, so it isn't billed.
+  (Was `502` before 2026-09-24.)
+- **429** `concurrency_limit_exceeded`, `rate_limited`, `overloaded`, `key_frozen` (key auto-frozen
+  after a burst of failed solves — usually bad proxies)
+- **500** `internal_error`
+- **502** `solve_failed` — the solve was attempted and failed; it isn't billed, and a blind retry
+  usually fails the same way
+- **503** `no_capacity`, `solver_unavailable` (a node was picked but couldn't be reached),
+  `maintenance`, `proxyless_disabled`
+- **504** `solve_timeout` — the solve ran past its deadline (not billed)
+
+Retry `429`, `503`, and `504` with backoff; don't blindly retry `502` `solve_failed` or `422`
+`proxy_unreachable` — fix the proxy or the input first.
 
 Raised by the SDK itself, with `.status` 0: `timeout` (the solve outran `deadlineMs`), `aborted`
 (your `AbortSignal` fired), `result_expired` (the job finished but its token was already cleared),
