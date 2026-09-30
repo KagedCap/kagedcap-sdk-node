@@ -138,11 +138,36 @@ export interface EvaluateResult {
   decision: 'allow' | 'challenge' | 'block';
 }
 
+/**
+ * A solve package on the calling API key: a fixed number of solves of one type per period.
+ * Solves of that type on this key draw from it instead of balance.
+ */
+export interface Subscription {
+  id: string;
+  /** Package name, e.g. "v3 Enterprise · 50k / week". */
+  package: string;
+  /** Billing SKU it covers, e.g. "v3_enterprise". */
+  sku: string;
+  period: 'week' | 'month';
+  status: 'active' | 'canceling' | 'past_due';
+  quota: number;
+  used: number;
+  remaining: number;
+  period_start: string | null;
+  period_end: string | null;
+  /** When the next period starts and `used` resets. Null when canceling or past due. */
+  renews_at: string | null;
+  /** When the package ends after a cancel. Null otherwise. */
+  expires_at: string | null;
+}
+
 export interface Balance {
   amount_micros: string;
   held_micros: string;
   available_micros: string;
   display: string;
+  /** Solve packages on the key that made the call; empty when it has none. */
+  subscriptions?: Subscription[];
 }
 
 export interface ClientOptions {
