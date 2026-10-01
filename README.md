@@ -92,7 +92,12 @@ It still works and takes the same params minus the polling ones. New code should
 const { token, score } = await kc.solveDeprecated({ sitekey: '6Lc…', url: 'https://example.com', action: 'login' });
 ```
 
-`kasadaLogin`, `kasadaReload`, and `evaluate` are unaffected — they still call `/solve` directly.
+`evaluate` now submits to `/v2/solve` and polls too, exactly like `solve` (it takes optional
+`deadlineMs` / `pollIntervalMs` / `signal`). `kasadaLogin` and `kasadaReload` are the exception:
+they post to the synchronous `/solve` and resolve with the result directly — no submit, no poll.
+Each of the three keeps a `*Deprecated` twin — `kasadaLoginDeprecated`, `kasadaReloadDeprecated`,
+`evaluateDeprecated` — on the synchronous `/solve`. And `submitSolve` + `getSolve` expose the
+submit and poll steps directly, for a callback-driven flow or your own loop.
 
 ### User agent
 
@@ -127,6 +132,10 @@ or pass `task` explicitly.
 `kasadaLogin` starts a session (requires a proxy — the token is IP-bound) and returns the
 full header set. Keep that result and pass it to `kasadaReload` to refresh the session — the
 SDK resends the session's `kpsdk_st`, `hash`, and `x_kpsdk_*` values for you (`hash` + `x_kpsdk_ct` are required).
+
+Both run on the synchronous `POST /solve` endpoint: the call holds the connection open for the
+solve and resolves with the result directly, so neither takes `deadlineMs` / `pollIntervalMs`
+(there's nothing to poll). Pass an `AbortSignal` to cancel the in-flight request.
 
 ```js
 const login = await kc.kasadaLogin({ site: 'ticketmaster', proxy: 'http://user:pass@1.2.3.4:8080' });

@@ -11,11 +11,17 @@
  *   const fresh = await kc.kasadaReload(login); // reuses login's kpsdk_st + x_kpsdk_*
  *
  *   const { token, decision } = await kc.evaluate({ url, proxy }); // Ticketmaster EPSF
+ *
+ * reCAPTCHA, tmpt and evaluate submit to `/v2/solve` and poll `/v2/solve/{id}` for the result, so
+ * no connection is held open for a solve. Kasada is the exception: `kasadaLogin` / `kasadaReload`
+ * post to the synchronous `/solve` and resolve with that response directly — no submit, no poll.
+ * The *Deprecated methods also call the synchronous `/solve`. submitSolve + getSolve expose the
+ * submit and poll steps for a callback-driven flow or your own loop.
  */
 
 const DEFAULT_BASE_URL = 'https://api.kagedcap.io';
 
-/** Total budget a `solve` gets for its submit plus every poll, when the caller names none. */
+/** Total budget a solve gets for its submit plus every poll, when the caller names none. */
 const DEFAULT_DEADLINE_MS = 120000;
 
 /**
@@ -61,28 +67,63 @@ function deriveTask(enterprise, hasProxy, version) {
   return base + suffix;
 }
 
-/**
- * reCAPTCHA tasks are the ONLY ones whose result the async endpoint can carry.
- *
- * A v2 job row stores a single `token` string and `GET /v2/solve/{id}` returns that and nothing
- * else. Per fleet: reCAPTCHA is a token (v2 also drops score/verification); tmpt is a token;
- * evaluate additionally returns `decision`, which would be lost; and Kasada has NO token at all
- * — it answers with headers, x_kpsdk_ct/cd/v/h, hash and kpsdk_st.
- *
- * Kasada is what makes this a billing bug rather than a cosmetic one: the solve dispatches,
- * succeeds, is charged for, and the job row has nowhere to put the result, so the caller polls
- * to `done` and reads a null token. Non-reCAPTCHA work therefore goes over `/solve`.
- *
- * Widen this ONLY when the job row can carry the fleet's result, not when v2 merely accepts it.
- */
-function isRecaptchaTask(task) {
-  return typeof task === 'string' && task.startsWith('ReCaptcha');
+function isKasadaTask(task) {
+  return typeof task === 'string' && task.startsWith('Kasada');
+}
+
+function isEvaluateTask(task) {
+  return task === 'EvaluateTask';
 }
 
 function stripUndefined(obj) {
   const out = {};
   for (const k of Object.keys(obj)) if (obj[k] !== undefined) out[k] = obj[k];
   return out;
+}
+
+/** The v1/v2 solve body — identical JSON, so solve/submitSolve/solveDeprecated stay in step. */
+function solveBody(params, task) {
+  const isKasada = isKasadaTask(task);
+  return {
+    task,
+    url: params.url,
+    sitekey: params.sitekey,
+    action: params.action,
+    proxy: params.proxy,
+    userAgent: params.userAgent || (isKasada ? undefined : DEFAULT_USER_AGENT),
+    device: params.device,
+    enhanced: params.enhanced,
+    secretKey: params.secretKey,
+  };
+}
+
+function evaluateBody(params) {
+  return {
+    task: 'EvaluateTask',
+    url: params.url,
+    proxy: params.proxy,
+    action: params.action,
+    phone_number: params.phone_number,
+    queueId: params.queueId,
+    eventId: params.eventId,
+    userAgent: params.userAgent || DEFAULT_USER_AGENT,
+  };
+}
+
+function kasadaLoginBody(params) {
+  return { task: 'KasadaLogin', site: params.site, url: params.url, proxy: params.proxy };
+}
+
+function kasadaReloadBody(p) {
+  return {
+    task: 'KasadaReload',
+    hash: p.hash,
+    site: p.site,
+    kpsdk_st: p.kpsdk_st,
+    x_kpsdk_ct: p.x_kpsdk_ct,
+    x_kpsdk_v: p.x_kpsdk_v,
+    x_kpsdk_h: p.x_kpsdk_h,
+  };
 }
 
 function abortedError() {
@@ -136,70 +177,162 @@ class KagedCapClient {
   }
 
   /**
-   * Solve a captcha. Pass `enterprise` and (optionally) `proxy` to auto-select the
-   * task, or set `task` explicitly.
+   * Solve a reCAPTCHA, tmpt, or evaluate captcha. Pass `enterprise` and (optionally) `proxy` to
+   * auto-select the task, or set `task` explicitly. For Kasada use `kasadaLogin` / `kasadaReload`
+   * — a Kasada result has no token for this method to resolve with, so a Kasada task is rejected.
    *
    * Submits the job to `/v2/solve` and polls `/v2/solve/{id}` every `pollIntervalMs` until it
    * finishes, so no connection is held open for the length of the solve. It still blocks and
-   * still resolves with the token — only the transport underneath changed.
+   * still resolves with the result — only the transport underneath changed.
    *
    * `deadlineMs` (120s by default) is the whole budget, submit plus every poll: run past it and
    * you get a KagedCapError with code `timeout`. Pass `signal` to cut a solve short sooner. A
-   * failed solve throws the same KagedCapError a failure has always thrown, and one whose token
+   * failed solve throws the same KagedCapError a failure has always thrown, and one whose result
    * the gateway has already cleared throws `result_expired`.
    *
    * `callback_url` (https, publicly resolvable) has the gateway POST the result to you as well,
    * and `idempotencyKey` makes a resent submit return the first job instead of buying a second.
-   *
-   * Omitting `userAgent` sends DEFAULT_USER_AGENT — a caller-supplied one always wins. Kasada
-   * tasks are skipped: their identity comes from the harvester, and the gateway drops any UA
-   * we send for that fleet.
    */
   async solve(params) {
     const task = params.task || deriveTask(!!params.enterprise, !!params.proxy, params.version);
-    const isKasada = task === 'KasadaLogin' || task === 'KasadaReload';
-    const signal = params.signal;
-    const pollIntervalMs = params.pollIntervalMs || DEFAULT_POLL_INTERVAL_MS;
-    const deadlineMs = params.deadlineMs || DEFAULT_DEADLINE_MS;
-    const deadlineAt = Date.now() + deadlineMs;
-
-    // The v2 submit body is the v1 /solve body verbatim plus callback_url, so this stays in step
-    // with solveDeprecated below — anything added there belongs here too.
-    const body = {
-      task,
-      url: params.url,
-      sitekey: params.sitekey,
-      action: params.action,
-      proxy: params.proxy,
-      userAgent: params.userAgent || (isKasada ? undefined : DEFAULT_USER_AGENT),
-      device: params.device,
-      enhanced: params.enhanced,
-      secretKey: params.secretKey,
-    };
-
-    /*
-     * tmpt, evaluate and Kasada run over `/solve`. Not a limitation of those fleets — the async
-     * job row cannot hold their results (see isRecaptchaTask). Transparent to the caller: they
-     * still get that fleet's full response, still bounded by `deadlineMs` and still cancellable
-     * via `signal`; only the transport differs.
-     */
-    if (!isRecaptchaTask(task)) {
-      return this._request('POST', '/solve', body, {
-        signal,
-        timeoutMs: Math.min(this.timeoutMs, deadlineMs),
-      });
+    if (isKasadaTask(task)) {
+      throw new KagedCapError(0, 'validation_error', 'solve() cannot carry a Kasada result (it has no token); use kasadaLogin() or kasadaReload()');
     }
-
-    const job = await this._request('POST', '/v2/solve', {
-      ...body,
-      callback_url: params.callback_url,
-    }, {
-      signal,
-      timeoutMs: Math.min(this.timeoutMs, deadlineMs),
+    const body = { ...solveBody(params, task), callback_url: params.callback_url };
+    return this._solveAsync(body, {
+      deadlineMs: params.deadlineMs,
+      pollIntervalMs: params.pollIntervalMs,
+      signal: params.signal,
       idempotencyKey: params.idempotencyKey,
+      // evaluate's "expired" test is the decision, not the token: a challenge verdict
+      // legitimately carries an empty token.
+      resultKey: isEvaluateTask(task) ? 'decision' : 'token',
     });
-    // 202 carries { success, id, status:'running' }; the id is the only part we can't do without.
-    if (!job.id) throw new KagedCapError(0, 'invalid_response', 'solve: /v2/solve accepted the job but returned no id');
+  }
+
+  /**
+   * Submit a reCAPTCHA, tmpt, or evaluate solve to `/v2/solve` and resolve with the job
+   * acknowledgement (`{ success, id, status: 'running' }`) without waiting. Pair with `getSolve`
+   * to run the wait yourself, or to not wait at all when a `callback_url` is doing the telling.
+   * Kasada runs through `kasadaLogin` / `kasadaReload` (synchronous `/solve`), which take its own inputs.
+   */
+  async submitSolve(params) {
+    const task = params.task || deriveTask(!!params.enterprise, !!params.proxy, params.version);
+    if (isKasadaTask(task)) {
+      throw new KagedCapError(0, 'validation_error', 'submitSolve() takes solve inputs; use kasadaLogin() or kasadaReload() for Kasada');
+    }
+    const body = { ...solveBody(params, task), callback_url: params.callback_url };
+    return this._submit(body, { signal: params.signal, timeoutMs: this.timeoutMs, idempotencyKey: params.idempotencyKey });
+  }
+
+  /**
+   * Fetch a queued solve's current state from `/v2/solve/{id}`, returned as it came. Read
+   * `status` (`running` | `done` | `failed`), not `success`. On `done`, the result fields are
+   * present until the gateway clears them ~5 minutes later. An id the gateway doesn't have (or
+   * that belongs to another account) throws `not_found`.
+   * @param {string} id
+   * @param {{ signal?: AbortSignal, timeoutMs?: number }} [opts]
+   */
+  async getSolve(id, opts) {
+    opts = opts || {};
+    return this._request('GET', '/v2/solve/' + id, undefined, { signal: opts.signal, timeoutMs: opts.timeoutMs });
+  }
+
+  /**
+   * Solve a captcha through the legacy `/solve` endpoint, which holds the HTTP connection open
+   * for the whole solve instead of polling.
+   *
+   * @deprecated Use `solve`, which submits to `/v2/solve` and polls for the result.
+   */
+  async solveDeprecated(params) {
+    const task = params.task || deriveTask(!!params.enterprise, !!params.proxy, params.version);
+    return this._request('POST', '/solve', solveBody(params, task));
+  }
+
+  /**
+   * Start a Kasada session. Requires `proxy` (the token is IP-bound). Posts to the synchronous
+   * `/solve` and resolves with that response directly — the full header set plus the `x_kpsdk_*`
+   * values. Keep the result and pass it to `kasadaReload` to refresh the session later.
+   * @param {{ proxy: string, site?: string, url?: string, signal?: AbortSignal }} params
+   */
+  async kasadaLogin(params) {
+    params = params || {};
+    return this._request('POST', '/solve', kasadaLoginBody(params), { signal: params.signal });
+  }
+
+  /**
+   * Start a Kasada session through the synchronous `/solve`.
+   * @deprecated Use `kasadaLogin` — it now posts to the same synchronous `/solve`; this alias stays for back-compat.
+   */
+  async kasadaLoginDeprecated(params) {
+    params = params || {};
+    return this._request('POST', '/solve', kasadaLoginBody(params));
+  }
+
+  /**
+   * Refresh a Kasada session (no proxy needed). Pass the `kasadaLogin` result directly (its
+   * kpsdk_st + x_kpsdk_* are resent for you) or explicit params. Posts to the synchronous `/solve`
+   * and resolves with that response directly.
+   * @param {object} session - a kasadaLogin result, or { kpsdk_st, hash, x_kpsdk_ct, x_kpsdk_v?, x_kpsdk_h? } (hash + x_kpsdk_ct required)
+   * @param {{ signal?: AbortSignal }} [opts]
+   */
+  async kasadaReload(session, opts) {
+    opts = opts || {};
+    const p = toKasadaReloadParams(session);
+    if (p.kpsdk_st == null) throw new KagedCapError(0, 'validation_error', 'kasadaReload: kpsdk_st is required — pass the kasadaLogin result or an explicit kpsdk_st');
+    return this._request('POST', '/solve', kasadaReloadBody(p), { signal: opts.signal });
+  }
+
+  /**
+   * Refresh a Kasada session through the synchronous `/solve`.
+   * @deprecated Use `kasadaReload` — it now posts to the same synchronous `/solve`; this alias stays for back-compat.
+   */
+  async kasadaReloadDeprecated(session) {
+    const p = toKasadaReloadParams(session);
+    if (p.kpsdk_st == null) throw new KagedCapError(0, 'validation_error', 'kasadaReload: kpsdk_st is required — pass the kasadaLogin result or an explicit kpsdk_st');
+    return this._request('POST', '/solve', kasadaReloadBody(p));
+  }
+
+  /**
+   * Evaluate a Ticketmaster EPSF check. Requires `proxy` (the verdict is IP-bound) and the page
+   * `url` — the host picks the flow: `auth.*` evaluates verify_phone, every other Ticketmaster
+   * host evaluates join_queue. Submits to `/v2/solve` and polls. Returns the allow token plus
+   * the `decision` (allow | challenge | block) behind it.
+   *
+   * `action` is left undefined unless named (sending it overrides the host default), as are the
+   * flow-specific fields (`phone_number`, `queueId`, `eventId`). `userAgent` defaults to
+   * DEFAULT_USER_AGENT and selects the solver's device profile, not just a header.
+   * @param {{ url: string, proxy: string, action?: 'verify_phone'|'join_queue', phone_number?: string, queueId?: string, eventId?: string, userAgent?: string, deadlineMs?: number, pollIntervalMs?: number, signal?: AbortSignal }} params
+   */
+  async evaluate(params) {
+    return this._solveAsync(evaluateBody(params), {
+      deadlineMs: params.deadlineMs, pollIntervalMs: params.pollIntervalMs, signal: params.signal, resultKey: 'decision',
+    });
+  }
+
+  /**
+   * Evaluate through the legacy synchronous `/solve`.
+   * @deprecated Use `evaluate`, which submits to `/v2/solve` and polls.
+   */
+  async evaluateDeprecated(params) {
+    return this._request('POST', '/solve', evaluateBody(params));
+  }
+
+  /** Current balance for the API key's account. */
+  async checkBalance() {
+    return this._request('GET', '/v1/balance');
+  }
+
+  /** Submit a prepared body to `/v2/solve` and poll until done. `resultKey` is the field whose
+   * absence on a done job means the result was swept. */
+  async _solveAsync(body, opts) {
+    opts = opts || {};
+    const signal = opts.signal;
+    const pollIntervalMs = opts.pollIntervalMs || DEFAULT_POLL_INTERVAL_MS;
+    const deadlineMs = opts.deadlineMs || DEFAULT_DEADLINE_MS;
+    const deadlineAt = Date.now() + deadlineMs;
+    const job = await this._submit(body, { signal, timeoutMs: Math.min(this.timeoutMs, deadlineMs), idempotencyKey: opts.idempotencyKey });
+    const resultKey = opts.resultKey || 'token';
 
     for (;;) {
       const left = deadlineAt - Date.now();
@@ -207,8 +340,8 @@ class KagedCapClient {
       await sleep(Math.min(pollIntervalMs, left), signal);
 
       // A poll always follows the wait, even one that landed exactly on the deadline: the budget
-      // bounds how long we wait for a solve, and by now the answer may already be sitting there.
-      // That last poll gets one interval to reply so it can't hang far past the caller's wall.
+      // bounds how long we wait, and by now the answer may already be sitting there. That last
+      // poll gets one interval to reply so it can't hang far past the caller's wall.
       const state = await this._request('GET', '/v2/solve/' + job.id, undefined, {
         signal,
         timeoutMs: Math.min(this.timeoutMs, Math.max(deadlineAt - Date.now(), pollIntervalMs)),
@@ -217,11 +350,13 @@ class KagedCapClient {
       // `status` is the completion test, not `success`: success only turns true once status is
       // 'done', so reading it instead would keep polling a job that has already failed.
       if (state.status === 'done') {
-        // The gateway clears `token` ~5 minutes after a solve completes (a reCAPTCHA token is
+        // The gateway clears the result ~5 minutes after a solve completes (a reCAPTCHA token is
         // dead in ~2 anyway), so a 'done' poll can arrive with nothing to hand back. That's a
-        // result the caller lost, not a successful empty token.
-        if (!state.token) {
-          throw new KagedCapError(0, 'result_expired', 'solve ' + job.id + ' completed but its token has already been cleared — poll sooner or use callback_url');
+        // result the caller lost, not a successful empty one. resultKey is the per-fleet field
+        // that proves the result is still there: token for reCAPTCHA/tmpt, decision for evaluate,
+        // x_kpsdk_ct for Kasada.
+        if (!state[resultKey]) {
+          throw new KagedCapError(0, 'result_expired', 'solve ' + job.id + ' completed but its result has already been cleared — poll sooner or use callback_url');
         }
         return state;
       }
@@ -233,92 +368,11 @@ class KagedCapClient {
     }
   }
 
-  /**
-   * Solve a captcha through the legacy `/solve` endpoint, which holds the HTTP connection open
-   * for the whole solve instead of polling.
-   *
-   * @deprecated Use `solve`, which submits to `/v2/solve` and polls for the result.
-   */
-  async solveDeprecated(params) {
-    const task = params.task || deriveTask(!!params.enterprise, !!params.proxy, params.version);
-    const isKasada = task === 'KasadaLogin' || task === 'KasadaReload';
-    return this._request('POST', '/solve', {
-      task,
-      url: params.url,
-      sitekey: params.sitekey,
-      action: params.action,
-      proxy: params.proxy,
-      userAgent: params.userAgent || (isKasada ? undefined : DEFAULT_USER_AGENT),
-      device: params.device,
-      enhanced: params.enhanced,
-      secretKey: params.secretKey,
-    });
-  }
-
-  /**
-   * Start a Kasada session. Requires `proxy` (the token is IP-bound). Returns the full
-   * header set — keep it and pass it to `kasadaReload` to refresh the session later.
-   * @param {{ proxy: string, site?: string, url?: string }} params
-   */
-  async kasadaLogin(params) {
-    params = params || {};
-    return this._request('POST', '/solve', {
-      task: 'KasadaLogin',
-      site: params.site,
-      url: params.url,
-      proxy: params.proxy,
-    });
-  }
-
-  /**
-   * Refresh a Kasada session (no proxy needed). Pass the `kasadaLogin` result directly (its
-   * kpsdk_st + x_kpsdk_* are resent for you) or explicit params.
-   * @param {object} session - a kasadaLogin result, or { kpsdk_st, hash, x_kpsdk_ct, x_kpsdk_v?, x_kpsdk_h? } (hash + x_kpsdk_ct required)
-   */
-  async kasadaReload(session) {
-    const p = toKasadaReloadParams(session);
-    if (p.kpsdk_st == null) throw new KagedCapError(0, 'validation_error', 'kasadaReload: kpsdk_st is required — pass the kasadaLogin result or an explicit kpsdk_st');
-    return this._request('POST', '/solve', {
-      task: 'KasadaReload',
-      hash: p.hash,
-      site: p.site,
-      kpsdk_st: p.kpsdk_st,
-      x_kpsdk_ct: p.x_kpsdk_ct,
-      x_kpsdk_v: p.x_kpsdk_v,
-      x_kpsdk_h: p.x_kpsdk_h,
-    });
-  }
-
-  /**
-   * Evaluate a Ticketmaster EPSF check. Requires `proxy` (the verdict is IP-bound) and the page
-   * `url` — the host is what picks the flow: `auth.*` evaluates verify_phone, every other
-   * Ticketmaster host evaluates join_queue. Returns the allow token plus the `decision`
-   * (allow | challenge | block) behind it.
-   *
-   * `action` is left undefined unless the caller names one: sending it overrides that host-based
-   * default, so a value we invented here would silently evaluate the wrong flow. Same reason the
-   * flow-specific fields (`phone_number`, `queueId`, `eventId`) are only forwarded when set.
-   *
-   * `userAgent` defaults to DEFAULT_USER_AGENT like a solve does — here it selects the whole
-   * device profile the solver runs (screen, GPU, client hints), not just a header.
-   * @param {{ url: string, proxy: string, action?: 'verify_phone'|'join_queue', phone_number?: string, queueId?: string, eventId?: string, userAgent?: string }} params
-   */
-  async evaluate(params) {
-    return this._request('POST', '/solve', {
-      task: 'EvaluateTask',
-      url: params.url,
-      proxy: params.proxy,
-      action: params.action,
-      phone_number: params.phone_number,
-      queueId: params.queueId,
-      eventId: params.eventId,
-      userAgent: params.userAgent || DEFAULT_USER_AGENT,
-    });
-  }
-
-  /** Current balance for the API key's account. */
-  async checkBalance() {
-    return this._request('GET', '/v1/balance');
+  async _submit(body, opts) {
+    const job = await this._request('POST', '/v2/solve', body, opts);
+    // 202 carries { success, id, status:'running' }; the id is the only part we can't do without.
+    if (!job.id) throw new KagedCapError(0, 'invalid_response', '/v2/solve accepted the job but returned no id');
+    return job;
   }
 
   /**

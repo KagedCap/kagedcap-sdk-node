@@ -210,43 +210,116 @@ test('solveDeprecated still posts a single synchronous /solve', async () => {
   assert.equal(fetch.calls[0].body.task, 'ReCaptchaV3TaskProxyLess');
 });
 
-test('kasada and evaluate stay on the synchronous /solve endpoint', async () => {
-  const kasada = stubFetch([{ status: 200, body: { success: true, x_kpsdk_cd: 'cd', kpsdk_st: 1 } }]);
-  await client(kasada).kasadaLogin({ site: 'ticketmaster', proxy: 'http://u:p@1.2.3.4:8080' });
-  assert.equal(kasada.calls[0].url, 'https://api.kagedcap.io/solve');
-
-  const evaluate = stubFetch([{ status: 200, body: { success: true, token: 'tok', decision: 'allow' } }]);
-  await client(evaluate).evaluate({ url: 'https://auth.ticketmaster.com/x', proxy: 'http://u:p@1.2.3.4:8080' });
-  assert.equal(evaluate.calls[0].url, 'https://api.kagedcap.io/solve');
-});
-
 /*
- * Only reCAPTCHA rides the async endpoint.
+ * reCAPTCHA, tmpt and evaluate ride the async endpoint: the v2 job row carries each fleet's full
+ * result (a token, or evaluate's decision), so solve / evaluate submit to /v2/solve and poll.
+ * solve itself rejects a Kasada task, because a Kasada result has no token for it to resolve with.
  *
- * A v2 job row holds one `token` string, so it cannot represent a Kasada result (headers,
- * x_kpsdk_*, hash — no token at all) or evaluate's `decision`. Routing those through /v2/solve
- * charged the customer and handed back a null token. These pin the split so a future
- * "v2 for everything" change has to delete a test that says why.
+ * Kasada is the exception: kasadaLogin / kasadaReload post to the synchronous /solve and resolve
+ * with that response directly, no polling. The *Deprecated methods all use the synchronous /solve.
  */
 
-test('solve uses the async endpoint for reCAPTCHA', async () => {
-  const fetch = stubFetch([ACCEPTED, DONE]);
-  await client(fetch).solve(Object.assign({}, SOLVE, { task: 'ReCaptchaV3EnterpriseTask' }));
-  assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/v2/solve');
+test('solve uses the async endpoint for reCAPTCHA and tmpt', async () => {
+  for (const task of ['ReCaptchaV3EnterpriseTask', 'TicketmasterTmptTask']) {
+    const fetch = stubFetch([ACCEPTED, { status: 200, body: { success: true, id: 'job-1', status: 'done', task, token: 'tok' } }]);
+    const res = await client(fetch).solve(Object.assign({}, SOLVE, { task }));
+    assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/v2/solve', task);
+    assert.equal(res.token, 'tok');
+  }
 });
 
-for (const task of ['KasadaLogin', 'KasadaReload', 'TicketmasterTmptTask', 'EvaluateTask']) {
-  test(`solve uses the synchronous /solve for ${task}`, async () => {
-    const fetch = stubFetch([{ status: 200, body: { success: true, task, token: 'tok' } }]);
-    const res = await client(fetch).solve(Object.assign({}, SOLVE, { task }));
+test('solve rejects a Kasada task without calling the API', async () => {
+  for (const task of ['KasadaLogin', 'KasadaReload']) {
+    const fetch = stubFetch([]);
+    await assert.rejects(client(fetch).solve(Object.assign({}, SOLVE, { task })), (err) => {
+      assert.equal(err.code, 'validation_error');
+      return true;
+    });
+    assert.equal(fetch.calls.length, 0, `${task} must reject before any request`);
+  }
+});
 
-    // One request, and it is the synchronous one — no job id, no polling.
+test('kasadaLogin posts to the synchronous /solve and resolves with the result directly', async () => {
+  const fetch = stubFetch([
+    { status: 200, body: { success: true, task: 'KasadaLogin', site: 'ticketmaster', headers: { 'user-agent': 'UA' }, x_kpsdk_ct: 'ct', x_kpsdk_cd: 'cd', x_kpsdk_v: 'v', x_kpsdk_h: 'h', kpsdk_st: 123, hash: 'hh', reload: true, user_agent: 'UA' } },
+  ]);
+  const res = await client(fetch).kasadaLogin({ site: 'ticketmaster', proxy: 'http://u:p@1.2.3.4:8080' });
+  // One POST /solve, no submit-and-poll round trip.
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/solve');
+  assert.equal(fetch.calls[0].init.method, 'POST');
+  assert.equal(fetch.calls[0].body.task, 'KasadaLogin');
+  assert.equal(res.x_kpsdk_ct, 'ct');
+  assert.equal(res.x_kpsdk_cd, 'cd');
+  assert.equal(res.headers['user-agent'], 'UA');
+});
+
+test('kasadaReload resends the prior session to the synchronous /solve', async () => {
+  const fetch = stubFetch([
+    { status: 200, body: { success: true, task: 'KasadaReload', x_kpsdk_ct: 'ct1', x_kpsdk_cd: 'cd1' } },
+  ]);
+  const res = await client(fetch).kasadaReload({ kpsdk_st: 123, hash: 'hh', x_kpsdk_ct: 'ct0', site: 'ticketmaster' });
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/solve');
+  assert.equal(fetch.calls[0].init.method, 'POST');
+  assert.equal(fetch.calls[0].body.task, 'KasadaReload');
+  assert.equal(fetch.calls[0].body.kpsdk_st, 123);
+  assert.equal(res.x_kpsdk_ct, 'ct1');
+});
+
+test('evaluate submits to /v2/solve and returns the decision', async () => {
+  const fetch = stubFetch([
+    { status: 202, body: { success: true, id: 'job-e', status: 'running' } },
+    { status: 200, body: { success: true, id: 'job-e', status: 'done', token: 'ev', decision: 'allow' } },
+  ]);
+  const res = await client(fetch).evaluate({ url: 'https://auth.ticketmaster.com/x', proxy: 'http://u:p@1.2.3.4:8080', pollIntervalMs: 5 });
+  assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/v2/solve');
+  assert.equal(res.decision, 'allow');
+  assert.equal(res.token, 'ev');
+});
+
+test('evaluate keeps a challenge decision with no token', async () => {
+  const fetch = stubFetch([
+    { status: 202, body: { success: true, id: 'job-e', status: 'running' } },
+    { status: 200, body: { success: true, id: 'job-e', status: 'done', token: '', decision: 'challenge' } },
+  ]);
+  const res = await client(fetch).evaluate({ url: 'https://auth.ticketmaster.com/x', proxy: 'http://u:p@1.2.3.4:8080', pollIntervalMs: 5 });
+  assert.equal(res.decision, 'challenge');
+});
+
+test('evaluate throws result_expired when a done job has no decision', async () => {
+  const fetch = stubFetch([
+    { status: 202, body: { success: true, id: 'job-e', status: 'running' } },
+    { status: 200, body: { success: true, id: 'job-e', status: 'done' } },
+  ]);
+  await assert.rejects(client(fetch).evaluate({ url: 'https://auth.ticketmaster.com/x', proxy: 'http://u:p@1.2.3.4:8080', pollIntervalMs: 5 }), (err) => {
+    assert.equal(err.code, 'result_expired');
+    return true;
+  });
+});
+
+test('the *Deprecated methods still use the synchronous /solve', async () => {
+  for (const call of [
+    (kc) => kc.kasadaLoginDeprecated({ proxy: 'http://u:p@1.2.3.4:8080' }),
+    (kc) => kc.kasadaReloadDeprecated({ kpsdk_st: 1, hash: 'h' }),
+    (kc) => kc.evaluateDeprecated({ url: 'https://auth.ticketmaster.com/x', proxy: 'http://u:p@1.2.3.4:8080' }),
+  ]) {
+    const fetch = stubFetch([{ status: 200, body: { success: true, token: 't', x_kpsdk_ct: 'ct', decision: 'allow' } }]);
+    await call(client(fetch));
     assert.equal(fetch.calls.length, 1);
     assert.equal(fetch.calls[0].url, 'https://api.kagedcap.io/solve');
-    assert.equal(fetch.calls[0].init.method, 'POST');
-    assert.equal(fetch.calls[0].body.task, task);
-    // callback_url is a v2-only field and must not leak onto the v1 body.
-    assert.ok(!('callback_url' in fetch.calls[0].body));
-    assert.equal(res.token, 'tok');
-  });
-}
+  }
+});
+
+test('submitSolve and getSolve drive the primitives directly', async () => {
+  const sub = stubFetch([{ status: 202, body: { success: true, id: 'job-p', status: 'running' } }]);
+  const ack = await client(sub).submitSolve(SOLVE);
+  assert.equal(ack.id, 'job-p');
+  assert.equal(sub.calls[0].url, 'https://api.kagedcap.io/v2/solve');
+
+  const get = stubFetch([{ status: 200, body: { success: true, id: 'job-p', status: 'done', token: 'tok-p' } }]);
+  const job = await client(get).getSolve('job-p');
+  assert.equal(job.status, 'done');
+  assert.equal(job.token, 'tok-p');
+  assert.equal(get.calls[0].url, 'https://api.kagedcap.io/v2/solve/job-p');
+});
