@@ -186,16 +186,24 @@ test('solve surfaces a 404 poll as not_found without retrying it', async () => {
   assert.equal(fetch.calls.length, 2);
 });
 
-test('solve sends Idempotency-Key only when one is given', async () => {
+test('solve sends the caller\'s Idempotency-Key, or a generated UUIDv4 when none is given', async () => {
   const withKey = stubFetch([ACCEPTED, DONE]);
   await client(withKey).solve(Object.assign({}, SOLVE, { idempotencyKey: 'order-77' }));
   assert.equal(withKey.calls[0].init.headers['Idempotency-Key'], 'order-77');
   // The poll is a plain read; replaying the submit's key on it would be meaningless.
   assert.equal(withKey.calls[1].init.headers['Idempotency-Key'], undefined);
 
+  // 2026-10-20: a submit is retried after a shed, so every submit carries a key — the SDK's own
+  // when the caller has none — and two solve calls never share one.
   const without = stubFetch([ACCEPTED, DONE]);
   await client(without).solve(SOLVE);
-  assert.equal(without.calls[0].init.headers['Idempotency-Key'], undefined);
+  const generated = without.calls[0].init.headers['Idempotency-Key'];
+  assert.match(generated, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(without.calls[1].init.headers['Idempotency-Key'], undefined);
+
+  const again = stubFetch([ACCEPTED, DONE]);
+  await client(again).solve(SOLVE);
+  assert.notEqual(again.calls[0].init.headers['Idempotency-Key'], generated);
 });
 
 test('solveDeprecated still posts a single synchronous /solve', async () => {

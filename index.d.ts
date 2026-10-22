@@ -16,7 +16,10 @@ export interface AsyncWaitOptions {
   deadlineMs?: number;
   /** Gap between polls of `/v2/solve/{id}`. Defaults to 5000 (5s). */
   pollIntervalMs?: number;
-  /** Cancels the solve mid-request or mid-wait with a `KagedCapError` coded `'aborted'`. */
+  /**
+   * Cancels the solve. Fired mid-request or during a poll wait it rejects with a `KagedCapError`
+   * coded `'aborted'`; fired during a retry backoff, with one coded `'canceled'`.
+   */
   signal?: AbortSignal;
 }
 
@@ -36,13 +39,24 @@ export interface SolveDeprecatedParams {
   device?: 'desktop' | 'mobile';
   enhanced?: boolean;
   secretKey?: string;
+  /**
+   * Sent as `Idempotency-Key` on the request and on any resend of it; generated per call (a
+   * UUIDv4) when omitted. On the synchronous `/solve` only a request that never reached the
+   * gateway — a transport error, an edge-made bare 429/502/503/504 — is resent under it.
+   */
+  idempotencyKey?: string;
+  /** Cancels the in-flight request (`KagedCapError` coded `'aborted'`) or a retry wait (coded `'canceled'`). */
+  signal?: AbortSignal;
 }
 
 /** Inputs to `solve` / `submitSolve` — the same solve fields, plus the budget it polls within. */
 export interface SolveParams extends SolveDeprecatedParams, AsyncWaitOptions {
   /** https URL, publicly resolvable — the gateway POSTs the finished solve to it as well. */
   callback_url?: string;
-  /** Sent as `Idempotency-Key`: a resent submit returns the first job rather than a second solve. */
+  /**
+   * Sent as `Idempotency-Key` on the submit and on every retry of it. Omit it and the SDK
+   * generates a UUIDv4 per call; a failed call carries it as `KagedCapError.idempotencyKey`.
+   */
   idempotencyKey?: string;
 }
 
@@ -131,8 +145,10 @@ export interface KasadaLoginParams {
   site?: string;
   /** Optional informational page URL. */
   url?: string;
-  /** Cancels the in-flight `/solve` request with a `KagedCapError` coded `'aborted'`. */
+  /** Cancels the in-flight `/solve` request (`KagedCapError` coded `'aborted'`) or a retry wait (coded `'canceled'`). */
   signal?: AbortSignal;
+  /** Sent as `Idempotency-Key` and replayed on a resend; a UUIDv4 is generated per call when omitted. */
+  idempotencyKey?: string;
 }
 
 /** Inputs to refresh a Kasada session (KasadaReload). */
@@ -181,6 +197,8 @@ export interface EvaluateParams extends AsyncWaitOptions {
   eventId?: string;
   /** Selects the solver's device profile, not just a header. Omit it and `DEFAULT_USER_AGENT` is sent. */
   userAgent?: string;
+  /** Sent as `Idempotency-Key` on the submit and every retry of it; generated per call when omitted. */
+  idempotencyKey?: string;
 }
 
 /** Evaluate result — `token` is the EPSF allow token to replay on the next APS step. */
@@ -223,18 +241,57 @@ export interface Balance {
   subscriptions?: Subscription[];
 }
 
+/**
+ * How transient failures — HTTP 429, 500, 502, 503, 504 and transport errors — are retried.
+ * Every field is optional; the defaults are `DEFAULT_RETRY`. A zero, negative or non-numeric
+ * value means the default, and no wait is ever shorter than 50ms whatever is configured.
+ */
+export interface RetryOptions {
+  /** `false` switches retries off, the same as passing `retry: false`. */
+  enabled?: boolean;
+  /** Attempts per request (the submit, or one poll), the first try included. Default `Infinity`: until the deadline runs out. */
+  maxAttempts?: number;
+  /** First backoff; doubles on each retry. Default 250; floored at 50. */
+  initialBackoffMs?: number;
+  /** Ceiling for the doubling backoff. Default 5000. The actual wait is random in [50, backoff]. */
+  maxBackoffMs?: number;
+  /** Longest wait a `Retry-After` header can ask for. Default 10000; floored at 50. */
+  maxRetryAfterMs?: number;
+}
+
 export interface ClientOptions {
   baseUrl?: string;
+  /** Per-request timeout, and the whole budget (retries included) for calls that have no deadline of their own. Default 120000. */
   timeoutMs?: number;
   fetch?: typeof fetch;
+  /** Transient-failure retry policy; on by default. `false` disables it. */
+  retry?: false | RetryOptions;
 }
 
 export class KagedCapError extends Error {
-  /** HTTP status, or 0 for a failure raised client-side (`timeout`, `aborted`, `result_expired`). */
+  /**
+   * HTTP status, or 0 for a failure raised client-side: `timeout`, `aborted`, `canceled` (the
+   * signal fired during a retry backoff), `result_expired`, `network_error`.
+   */
   status: number;
+  /**
+   * The gateway's error code, or `'error'` for a response that carried no JSON envelope (a bare
+   * page from the edge in front of the API).
+   */
   code: string;
   /** `request_id` off the gateway's error envelope, when it sent one. Quote it to support. */
   requestId?: string;
+  /** The `Idempotency-Key` the failed request went out under — the gateway may still hold its job. */
+  idempotencyKey?: string;
+  /**
+   * Set when the retry policy gave up: every request the call sent in all — the submit, each
+   * poll and each retry — from the call's start to the final failure.
+   */
+  attempts?: number;
+  /** Set alongside `attempts`: wall time from the call's start to the final failure. */
+  elapsedMs?: number;
+  /** The last response's `Retry-After` in milliseconds when it sent a valid one; never negative, capped at 24h. */
+  retryAfterMs?: number;
 }
 
 export class KagedCapClient {
@@ -252,7 +309,7 @@ export class KagedCapClient {
   /** @deprecated Use `kasadaLogin` — it now posts to the same synchronous `/solve`; this alias stays for back-compat. */
   kasadaLoginDeprecated(params: KasadaLoginParams): Promise<KasadaResult>;
   /** Posts to the synchronous `/solve` and resolves with the refreshed Kasada session directly. */
-  kasadaReload(session: KasadaResult | KasadaReloadParams, opts?: { signal?: AbortSignal }): Promise<KasadaResult>;
+  kasadaReload(session: KasadaResult | KasadaReloadParams, opts?: { signal?: AbortSignal; idempotencyKey?: string }): Promise<KasadaResult>;
   /** @deprecated Use `kasadaReload` — it now posts to the same synchronous `/solve`; this alias stays for back-compat. */
   kasadaReloadDeprecated(session: KasadaResult | KasadaReloadParams): Promise<KasadaResult>;
   /** Submits to `/v2/solve` and polls for the evaluate decision. */
@@ -270,3 +327,5 @@ export const TASKS: Task[];
  * desktop profile the solver fleet runs. Never sent on Kasada tasks.
  */
 export const DEFAULT_USER_AGENT: string;
+/** The retry policy in force when `ClientOptions.retry` is omitted. */
+export const DEFAULT_RETRY: Readonly<Required<Omit<RetryOptions, 'enabled'>>>;
